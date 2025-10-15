@@ -34,41 +34,41 @@
 /*= END
   ==================================================== */
 
-/*= Style for menu with icon only START
+/*= Style for menu with icons only START
   ==================================================== */
   	/* style for widget */
-	#icon_only_widget {
+	#short_menu_bar {
 		background-color: #313a46;
 		width:50px;
 	}
 
     /* style for QPushButton and QLabel */
-	#icon_only_widget QPushButton, QLabel {
+	#short_menu_bar QPushButton, QLabel {
 		height:50px;
 		border:none;
 		/* border-bottom: 1px solid #b0b0b0; */
 	}
 
-	#icon_only_widget QPushButton:hover {
+	#short_menu_bar QPushButton:hover {
 		background-color: rgba( 86, 101, 115, 0.5);
 	}
 
 	/* style for logo image */
-	#label_4 {
+	#label {
 		padding: 5px
 	}
 /*= END
   ==================================================== */
 
-/*= Style for menu with icon and text START
+/*= Style for menu with icons and text START
   ==================================================== */
 	/* style for widget */
-	#full_menu_widget {
+	#long_menu_bar {
 		background-color: #313a46;
 	}
 
 	/* style for QPushButton */
-	#full_menu_widget QPushButton {
+	#long_menu_bar QPushButton {
 		border: none;
 		border-radius: 3px;
 		text-align: left;
@@ -76,11 +76,11 @@
 		color: #788596;
 	}
 
-	#full_menu_widget QPushButton:hover {
+	#long_menu_bar QPushButton:hover {
 		background-color: rgba( 86, 101, 115, 0.5);
 	}
 
-	#full_menu_widget QPushButton:checked {
+	#long_menu_bar QPushButton:checked {
 		color: #fff;
 	}
 
@@ -91,7 +91,7 @@
 	}
 
 	/* style for APP title */
-	#label_5 {
+	#label_2 {
 		padding-right: 10px;
 		color: #fff;
 	}
