@@ -105,8 +105,8 @@ class MainWindow(QMainWindow):
             comando = "bash -lc 'source "+ RUTA + "venv_drone/bin/activate && python3 -u " + RUTA + "obtener_coordenadas.py'"
             #print(comando)
             ##Aqui se hace la conexion
-            #lat, long = obtener_gps_ssh(TAILSCALE_IP, USERNAME, PASSWORD, comando)
-            lat, long = 18.888551, -99.022987
+            lat, long = obtener_gps_ssh(TAILSCALE_IP, USERNAME, PASSWORD, comando)
+            #lat, long = 18.888551, -99.022987
             #######Comprobar que se hayan obtenido las coordenadas correctamente
             if lat is not None and long is not None:
                 self.ui.btn_conectar.setStyleSheet("background-color: rgb(49, 201, 80); color: white")

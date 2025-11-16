@@ -1,12 +1,12 @@
 import json
 from PyQt5 import QtCore, QtGui
-from PyQt5.QtCore import Qt, pyqtSlot, QPointF, QRectF, QTimer, QFile, QTextStream, QUrl, QObject, pyqtSignal, QIODevice
+from PyQt5.QtCore import Qt, pyqtSlot, QPointF, QRectF, QTimer, QFile, QTextStream, QUrl, QObject, pyqtSignal, QIODevice,QThread
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen, QPolygonF, QIcon, QBrush, QFont
 import numpy as np
 import sys
 from PyQt5.QtWidgets import (QMainWindow, QApplication, QPushButton, QVBoxLayout, QStackedWidget, QSizePolicy,
                              QGraphicsScene, QGraphicsEllipseItem, QHBoxLayout, QLabel, QWidget, QFrame, QListWidget,
-                             QScrollArea, QMessageBox, QGraphicsView, QGraphicsPixmapItem, QUndoStack, QUndoCommand)
+                             QScrollArea, QMessageBox, QGraphicsView, QGraphicsPixmapItem, QUndoStack, QUndoCommand,QFileDialog)
 
 from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -18,6 +18,8 @@ from design import Ui_window
 import time
 import paramiko
 import json
+import os         # Para manejar rutas de archivos locales
+import posixpath  # Para manejar rutas de archivos remotas (en la Pi)
 
 
 ##Varaibles de conexion CAMBIARLAS CUANDO SE TRATE DE LA RASPBERRY
@@ -36,6 +38,117 @@ client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
 
+class SftpWorker(QObject):
+    """
+    Worker que corre en un hilo separado para descargar archivos vía SFTP
+    sin bloquear la GUI.
+    """
+    # Señales
+    progress = pyqtSignal(str)       # (mensaje de progreso)
+    finished = pyqtSignal()          # (descarga completada)
+    error = pyqtSignal(str)          # (error)
+
+    @pyqtSlot(str, str)
+    def download_files(self, remote_dir, local_dir):
+        """
+        Descarga todos los archivos .jpg y .png de un directorio remoto.
+        """
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            self.progress.emit("Conectando para transferencia de archivos...")
+            client.connect(TAILSCALE_IP, username=USERNAME, password=PASSWORD, timeout=10)
+            
+            sftp = client.open_sftp()
+            self.progress.emit(f"Accediendo a: {remote_dir}")
+            
+            files = sftp.listdir(remote_dir)
+            
+            # Filtra solo por imágenes
+            images = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            
+            if not images:
+                self.error.emit("No se encontraron imágenes en el directorio.")
+                sftp.close()
+                client.close()
+                return
+
+            total_images = len(images)
+            for i, fname in enumerate(images):
+                self.progress.emit(f"Descargando {fname} ({i+1}/{total_images})...")
+                
+                remote_path = posixpath.join(remote_dir, fname)
+                local_path = os.path.join(local_dir, fname)
+                
+                sftp.get(remote_path, local_path)
+
+            sftp.close()
+            client.close()
+            self.progress.emit("¡Descarga completada!")
+            self.finished.emit()
+
+        except Exception as e:
+            self.error.emit(f"Error de SFTP: {str(e)}")
+        finally:
+            if 'client' in locals() and client.get_transport() is not None:
+                client.close()
+
+class SshWorker(QObject):
+    """
+    Worker que corre en un hilo separado para manejar la conexión SSH
+    y la ejecución de scripts sin bloquear la GUI.
+    """
+    # Señales para comunicarse con la página principal
+    finished = pyqtSignal(str, str)  # (stdout, stderr)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)       # Para enviar actualizaciones de estado
+
+    @pyqtSlot(str)
+    def run_ssh_command(self, json_payload):
+        """
+        Este es el método que se ejecuta en el hilo secundario.
+        """
+        try:
+            # Re-inicializa el cliente DENTRO del hilo
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            self.progress.emit("Conectando al UAV...")
+            client.connect(TAILSCALE_IP, username=USERNAME, password=PASSWORD, timeout=10)
+            
+            self.progress.emit("Ejecutando script de monitoreo...")
+            cmd = f"bash -lc 'source /home/pera/venv_drone/bin/activate && python3 -u /home/pera/xdd3.py'"
+            stdin, stdout, stderr = client.exec_command(cmd, get_pty=False)
+
+            # Enviar JSON
+            stdin.write(json_payload)
+            stdin.flush()
+            stdin.channel.shutdown_write()
+
+            # Leer la salida línea por línea
+            out_lines = []
+            for line in iter(stdout.readline, ""):
+                line = line.strip()
+                if not line:
+                    continue # Ignora líneas vacías
+                
+                # Emite CUALQUIER línea (sea de estado o %) como progreso
+                self.progress.emit(line) 
+                
+                out_lines.append(line)
+            
+            out = "\n".join(out_lines)
+            err = stderr.read().decode('utf-8')
+            
+            self.progress.emit("Script finalizado.")
+            self.finished.emit(out, err)
+
+        except Exception as e:
+            self.error.emit(f"Error de conexión o ejecución: {str(e)}")
+        finally:
+            client.close()
+            self.progress.emit("Conexión cerrada.")
 
 class Bridge(QObject):
     # Signal to send the clicked coordinates to the main window
@@ -136,14 +249,61 @@ class page_Tablero(QWidget):
 
 # --- PÁGINA DIAGNOSTICAR ---
 class page_diagnosticar(QWidget):
+    # --- AÑADE ESTA SEÑAL ---
+    # Señal para iniciar el trabajo de SSH desde el hilo principal
+    start_ssh = pyqtSignal(str)
+    start_sftp_download = pyqtSignal(str, str)
+
     def __init__(self):
         super().__init__()
+
+        self.PREDEFINED_SAVE_PATH = os.path.join(os.path.expanduser("~"), "Drone_Mission_Photos")
+        self.PREDEFINED_REMOTE_PATH = "/home/pera/Downloads/photos/photo_path"
+
         self.current_step = 0
         self.conectado = False
 
-        # Listas para guardar las coordenadas de cada paso
-        self.perimeter_points = []  # Para los 4 puntos de la página 1
-        self.start_point = None  # Para el punto único de la página 2
+        self.perimeter_points = []
+        self.start_point = None
+
+        # --- AÑADE ESTO: Configuración del Hilo y Worker ---
+        self.ssh_thread = QThread(self)
+        self.ssh_worker = SshWorker()
+        
+        # Mover el worker al hilo
+        self.ssh_worker.moveToThread(self.ssh_thread)
+
+        # Conectar señales y slots
+        # 1. Iniciar el trabajo cuando emitamos 'start_ssh'
+        self.start_ssh.connect(self.ssh_worker.run_ssh_command)
+
+        # 2. Recibir los resultados cuando el worker termine
+        self.ssh_worker.finished.connect(self.on_ssh_finished)
+        self.ssh_worker.error.connect(self.on_ssh_error)
+        self.ssh_worker.progress.connect(self.on_ssh_progress)
+
+        # 3. Limpieza: Asegurarse de que el hilo se cierre
+        self.ssh_thread.finished.connect(self.ssh_worker.deleteLater)
+        # (Asegúrate de llamar a self.ssh_thread.quit() cuando cierres la app)
+
+        # Iniciar el hilo (estará esperando señales)
+        self.ssh_thread.start()
+        # --- FIN DE LA SECCIÓN AÑADIDA ---
+
+        # --- AÑADE ESTO: Configuración del Hilo y Worker SFTP ---
+        self.sftp_thread = QThread(self)
+        self.sftp_worker = SftpWorker()
+        self.sftp_worker.moveToThread(self.sftp_thread)
+
+        # Conectar señales y slots
+        self.start_sftp_download.connect(self.sftp_worker.download_files)
+        self.sftp_worker.progress.connect(self.on_download_progress)
+        self.sftp_worker.finished.connect(self.on_download_complete)
+        self.sftp_worker.error.connect(self.on_ssh_error) # Podemos reusar el slot de error
+
+        # Iniciar el hilo SFTP
+        self.sftp_thread.start()
+        # --- FIN DE LA SECCIÓN AÑADIDA ---
 
         self.initUI()
 
@@ -296,34 +456,40 @@ class page_diagnosticar(QWidget):
 
     def create_page3(self):
         page = QWidget()
-        # Guarda el layout para poder añadirle cosas después
         layout = QVBoxLayout(page)
 
         title = QLabel("Realizando diagnostico!")
         title.setStyleSheet("font-size: 26px; font-weight: bold;")
         layout.addWidget(title)
 
-        # 1. Crea el mensaje de "bloqueado"
-        self.locked_label = QLabel("El UAV se encuentra en movimiento.")
-        self.locked_label.setStyleSheet("color: Black; font-size: 20px; font-weight: bold; qproperty-alignment: 'AlignCenter';")
-        n = 0
-        text = QLabel(str(n) + "% monitoreado")
-        text.setStyleSheet("font-size: 16px;")
-        layout.addWidget(text)
-        layout.addWidget(self.locked_label)
+        # --- MODIFICADO ---
+        # Dales nombres con 'self.'
+        self.progress_status_label = QLabel("Iniciando conexión...")
+        self.progress_status_label.setStyleSheet("color: Black; font-size: 20px; font-weight: bold; qproperty-alignment: 'AlignCenter';")
+        
+        self.progress_percent_label = QLabel("0% monitoreado")
+        self.progress_percent_label.setStyleSheet("font-size: 16px;")
+        
+        layout.addWidget(self.progress_percent_label)
+        layout.addWidget(self.progress_status_label)
+        # --- FIN MODIFICADO ---
 
         btn_abortar = QPushButton("Abortar operación")
         btn_abortar.setStyleSheet("background-color: #f44336; color: white;")
-        btn_abortar.clicked.connect(self.abort)
+        btn_abortar.clicked.connect(self.abort) # (Nota: Abortar un hilo requiere más lógica)
 
-        btn_siguiente = QPushButton("Siguiente")
-        btn_siguiente.setStyleSheet("background-color: #4CAF50; color: white;")
-        btn_siguiente.clicked.connect(self.go_to_step4)
+        # --- MODIFICADO ---
+        # Dale un nombre al botón y deshabilítalo al inicio
+        self.btn_page3_siguiente = QPushButton("Siguiente")
+        self.btn_page3_siguiente.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.btn_page3_siguiente.clicked.connect(self.go_to_step4)
+        self.btn_page3_siguiente.setEnabled(False) # <--- Deshabilitado
+        # --- FIN MODIFICADO ---
 
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(btn_abortar)
         btn_layout.addStretch()
-        btn_layout.addWidget(btn_siguiente)
+        btn_layout.addWidget(self.btn_page3_siguiente) # Usamos la variable de 'self'
         layout.addLayout(btn_layout)
 
         return page
@@ -761,43 +927,57 @@ class page_diagnosticar(QWidget):
             QMessageBox.warning(self, "Error", "Debes seleccionar un punto de despegue.")
 
     def go_to_step3(self):
-        coordenadas_manuales = [(18.888597, -99.023020),(18.888596, -99.022982),(18.888565, -99.023013),(18.888569, -99.022972)]
+        # (Tu coordenada manual no se usa, la he comentado)
+        # coordenadas_manuales = [(18.888597, -99.023020),(18.888596, -99.022982),(18.888565, -99.023013),(18.888569, -99.022972)]
+        
         if len(self.perimeter_points) == 4:
+            # 1. Cambia de página INMEDIATAMENTE. Esto ahora funciona.
             self.current_step = 3
             self.update_page()
+            
+            # 2. Resetea el estado de la página 3
+            self.btn_page3_siguiente.setEnabled(False)
+            self.progress_status_label.setText("Preparando script...")
+            self.progress_percent_label.setText("0%")
+
+            # 3. Prepara los datos
             json_payload = json.dumps(self.perimeter_points)
-            cmd = f"bash -lc 'source /home/pera/venv_drone/bin/activate && python3 -u /home/pera/xdd2.py'"
-            client.connect(TAILSCALE_IP, username=USERNAME, password=PASSWORD)
-            stdin, stdout, stderr = client.exec_command(cmd, get_pty=False)
-
-            # enviar JSON y cerrar stdin para indicar EOF
-            stdin.write(json_payload)
-            stdin.flush()
-            stdin.channel.shutdown_write()
-
-            # leer salida (bloqueante hasta que el proceso termine)
-            out = stdout.read().decode('utf-8')
-            err = stderr.read().decode('utf-8')
+            
+            # 4. Emite la señal para que el worker (en el otro hilo) comience.
+            #    La GUI NO se bloqueará.
+            self.start_ssh.emit(json_payload)
+            
+            # (Se eliminó todo el código bloqueante de paramiko)
+        else:
+            QMessageBox.warning(self, "Error", "Debes seleccionar 4 puntos.")
 
 
     def go_to_step4(self):
-        if len(self.perimeter_points) == 4:
-            self.current_step = 4
-            # Limpiar centrar y marcar mapa
-            self.web_view4.page().runJavaScript("clearMarkers();")
-            self.web_view4.page().runJavaScript(f"map.setView([{self.start_point[0]}, {self.start_point[1]}], {18});")
-            self.web_view4.page().runJavaScript(
-                f"addMarker({self.start_point[0]}, {self.start_point[1]}, 'lightgreen');")
-            # Marca del área de monitoreo
-            for p in self.perimeter_points:
-                self.web_view4.page().runJavaScript(f"addMarker({p[0]}, {p[1]}, 'red');")
-            else:
-                points_json = json.dumps(self.perimeter_points)
-                self.web_view4.page().runJavaScript(f"drawPolygon('{points_json}');")
-            self.update_page()
+        """
+        Este método inicia la descarga desde la RUTA REMOTA predefinida
+        hacia la RUTA LOCAL predefinida.
+        """
+        # 1. Obtiene ambas rutas predefinidas
+        local_save_dir = self.PREDEFINED_SAVE_PATH
+        remote_save_dir = self.PREDEFINED_REMOTE_PATH # <-- Usa la nueva variable
+        
+        # (El 'if not self.remote_photos_dir:' ya no es necesario)
 
-        else:
-            QMessageBox.warning(self, "Error", "Debes seleccionar exactamente 4 puntos para el perímetro.")
+        # 2. Asegúrate de que el directorio local exista
+        try:
+            # os.makedirs con exist_ok=True es como "mkdir -p"
+            os.makedirs(local_save_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Directorio", f"No se pudo crear la carpeta local: {local_save_dir}\nError: {e}")
+            return
+            
+        # 3. Inicia la descarga
+        self.progress_status_label.setText(f"Descargando de {remote_save_dir}...")
+        self.progress_percent_label.setText("") # Limpiar porcentaje
+        self.btn_page3_siguiente.setEnabled(False) # Deshabilitar botón durante la descarga
+        
+        # 4. Emite la señal con AMBAS rutas predefinidas
+        self.start_sftp_download.emit(remote_save_dir, local_save_dir)
 
     def come_back_to_step1(self):
         self.clear_perimeter_markers()
@@ -822,6 +1002,92 @@ class page_diagnosticar(QWidget):
 
     def update_page(self):
         self.stacked_widget.setCurrentIndex(self.current_step)
+
+    def _show_page_4(self):
+        """
+        Esta función contiene la LÓGICA ORIGINAL de tu go_to_step4.
+        Se encarga de preparar y mostrar la página 4.
+        """
+        if len(self.perimeter_points) == 4:
+            self.current_step = 4
+            # Limpiar, centrar y marcar mapa
+            self.web_view4.page().runJavaScript("clearMarkers();")
+            self.web_view4.page().runJavaScript(f"map.setView([{self.start_point[0]}, {self.start_point[1]}], {18});")
+            self.web_view4.page().runJavaScript(
+                f"addMarker({self.start_point[0]}, {self.start_point[1]}, 'lightgreen');")
+            # Marca del área de monitoreo
+            for p in self.perimeter_points:
+                self.web_view4.page().runJavaScript(f"addMarker({p[0]}, {p[1]}, 'red');")
+            else:
+                points_json = json.dumps(self.perimeter_points)
+                self.web_view4.page().runJavaScript(f"drawPolygon('{points_json}');")
+            
+            self.update_page() # <-- Esto cambia a la página 4
+        else:
+             QMessageBox.warning(self, "Error", "Debes seleccionar exactamente 4 puntos para el perímetro.")
+
+    # --- AÑADE ESTOS 3 MÉTODOS NUEVOS ---
+
+    @pyqtSlot(str)
+    def on_ssh_progress(self, message):
+        """
+        Este slot se activa cada vez que el worker emite 'progress'.
+        Ahora distingue entre mensajes de estado y de porcentaje.
+        """
+        if "%" in message:
+            # Es un mensaje de porcentaje
+            self.progress_percent_label.setText(message)
+        elif "success" not in message and "error" not in message: 
+            # Es un mensaje de estado (e ignoramos el JSON final)
+            # (Asumiendo que tus mensajes de estado no contienen la palabra "success")
+            self.progress_status_label.setText(message)
+
+    @pyqtSlot(str, str)
+    def on_ssh_finished(self, out, err):
+        """
+        Este slot se activa CUANDO el script termina exitosamente.
+        """
+        self.progress_status_label.setText("¡Diagnóstico completado!")
+        self.progress_percent_label.setText("100% monitoreado")
+        
+        # Habilita el botón "Siguiente"
+        self.btn_page3_siguiente.setEnabled(True)
+        
+        # (Opcional) Puedes imprimir la salida para depurar
+        print("--- SALIDA DEL SCRIPT ---")
+        print(out)
+        if err:
+            print("--- ERRORES DEL SCRIPT ---")
+            print(err)
+
+    @pyqtSlot(str)
+    def on_ssh_error(self, error_message):
+        """
+        Este slot se activa si el worker falla (ej. error de conexión).
+        """
+        QMessageBox.critical(self, "Error de Diagnóstico", error_message)
+        # Enviamos al usuario de vuelta al paso 1
+        self.come_back_to_step1()
+    
+    @pyqtSlot(str)
+    def on_download_progress(self, message):
+        """
+        Se activa con el worker SFTP para actualizar el estado.
+        """
+        self.progress_status_label.setText(message)
+
+    @pyqtSlot()
+    def on_download_complete(self):
+        """
+        Se activa CUANDO el worker SFTP termina.
+        Ahora, finalmente, vamos a la página 4.
+        """
+        self.progress_status_label.setText("¡Descarga completa!")
+        # Re-habilita el botón por si acaso
+        self.btn_page3_siguiente.setEnabled(True) 
+        
+        # Ahora sí, vamos a la página de resultados
+        self._show_page_4()
            
 
 
