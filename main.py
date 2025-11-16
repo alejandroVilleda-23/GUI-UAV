@@ -1,12 +1,12 @@
 from PyQt5 import QtCore, QtGui
 from PyQt5.QtWidgets import QMainWindow, QApplication, QPushButton, QApplication
-from PyQt5.QtCore import pyqtSlot, QFile, QTextStream, Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import pyqtSlot, QFile, QTextStream, Qt, QUrl
 import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QLabel, QSizePolicy
 )
-import time
+
 
 import sys
 from PyQt5.QtWidgets import (QMainWindow, QApplication, QPushButton, QVBoxLayout,
@@ -22,34 +22,22 @@ import folium
 from design import Ui_window
 from utils import *
 
-from utils_connection import obtener_gps_ssh
-
-##Varaibles de conexion CAMBIARLAS CUANDO SE TRATE DE LA RASPBERRY
-#Ip de tailscale del dispositivo
-TAILSCALE_IP = "10.3.141.1"
-#Nombre de usuario con el que se inicia sesion en el otro dispositivo
-USERNAME = "pera"
-#Contrasena
-PASSWORD = "2314"
-
-##Ruta CAMBIAR CUANDO SEA CON RASPBERRY
-RUTA = "/home/pera/"
-
 
 class MainWindow(QMainWindow):
-    estado_conexion_changed = pyqtSignal(bool, float, float)
-
     def __init__(self):
         super(MainWindow, self).__init__()
-        self.conectado = False
-        self.coordenadas_iniciales = (20.432939, -99.598862)
+
         self.ui = Ui_window()
+        self.conectado = False
         self.ui.setupUi(self)
 
         # Crear páginas
         self.tablero_page = page_Tablero()
         self.diagnosticar_page = page_diagnosticar()
         self.estadisticos_page = page_Estadisticas()
+
+        self.diagnosticar_page.diagnostico_completo.connect(self.tablero_page.set_result_plots)
+        self.diagnosticar_page.diagnostico_completo.connect(self.estadisticos_page.set_result_plots)
 
         page0 = self.ui.stackedWidget.widget(0)
         if not page0.layout(): page0.setLayout(QVBoxLayout())
@@ -62,8 +50,6 @@ class MainWindow(QMainWindow):
         page2 = self.ui.stackedWidget.widget(2)
         if not page2.layout(): page2.setLayout(QVBoxLayout())
         page2.layout().addWidget(self.estadisticos_page)
-
-        self.estado_conexion_changed.connect(self.diagnosticar_page.set_estado_conexion)
 
         # Conectar botones de sidebarr
         self.ui.btn_tablero.toggled.connect(self.on_btn_tablero_toggled)
@@ -100,30 +86,13 @@ class MainWindow(QMainWindow):
 
     # Cuando le picas en conectar
     def on_btn_conectar_toggled(self):
-        is_checked = self.ui.btn_conectar.isChecked() or self.ui.btn_conectar_2.isChecked()
-        if is_checked:
-            comando = "bash -lc 'source "+ RUTA + "venv_drone/bin/activate && python3 -u " + RUTA + "obtener_coordenadas.py'"
-            #print(comando)
-            ##Aqui se hace la conexion
-            lat, long = obtener_gps_ssh(TAILSCALE_IP, USERNAME, PASSWORD, comando)
-            #lat, long = 18.888551, -99.022987
-            #######Comprobar que se hayan obtenido las coordenadas correctamente
-            if lat is not None and long is not None:
-                self.ui.btn_conectar.setStyleSheet("background-color: rgb(49, 201, 80); color: white")
-                self.ui.btn_conectar_2.setStyleSheet("background-color: rgb(49, 201, 80); color: white")
-                self.ui.btn_conectar_2.setText("Conectado")
-                self.conectado = True
-                self.estado_conexion_changed.emit(self.conectado, lat, long)
-            else:
-                self.ui.btn_conectar.setStyleSheet("background-color: rgb(201, 49, 49); color: white")
-                self.ui.btn_conectar_2.setStyleSheet("background-color: rgb(201, 49, 49); color: white")
-                self.ui.btn_conectar_2.setText("Intentar nuevamente")
-                self.conectado = False
-                self.estado_conexion_changed.emit(self.conectado, 0, 0)
+        if self.ui.btn_conectar.isChecked() or self.ui.btn_conectar_2.isChecked():
+            self.ui.btn_conectar.setStyleSheet("background-color: rgb(49, 201, 80); color: white")
+            self.ui.btn_conectar_2.setStyleSheet("background-color: rgb(49, 201, 80); color: white")
+            self.ui.btn_conectar_2.setText("Conectado")
+            self.conectado = True
 
-
-        #self.estado_conexion_changed.emit(self.conectado, lat, long)
-
+        self.diagnosticar_page.set_estado_conexion(self.conectado)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -139,6 +108,7 @@ if __name__ == "__main__":
 
     # Cierre
     sys.exit(app.exec())
+
 
 
 
