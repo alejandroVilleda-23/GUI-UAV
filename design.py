@@ -151,6 +151,7 @@ class Ui_window(object):
         self.verticalLayout_4.addLayout(self.verticalLayout_2)
         spacerItem5 = QtWidgets.QSpacerItem(20, 200, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding)
         self.verticalLayout_4.addItem(spacerItem5)
+        self.verticalLayout_4.addItem(spacerItem5)
         self.btn_conectar_2 = QtWidgets.QPushButton(self.long_menu_bar)
         self.btn_conectar_2.setIcon(icon3)
         self.btn_conectar_2.setCheckable(True)
@@ -244,5 +245,4 @@ if __name__ == "__main__":
     ui.setupUi(window)
     window.show()
     sys.exit(app.exec_())
-
 

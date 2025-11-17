@@ -51,6 +51,9 @@ class MainWindow(QMainWindow):
         self.diagnosticar_page = page_diagnosticar()
         self.estadisticos_page = page_Estadisticas()
 
+        self.diagnosticar_page.diagnostico_completo.connect(self.tablero_page.set_result_plots)
+        self.diagnosticar_page.diagnostico_completo.connect(self.estadisticos_page.set_result_plots)
+
         page0 = self.ui.stackedWidget.widget(0)
         if not page0.layout(): page0.setLayout(QVBoxLayout())
         page0.layout().addWidget(self.tablero_page)
